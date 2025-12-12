@@ -1,14 +1,25 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { ordersAPI, menuAPI, cartAPI } from "../api/api.js";
+import { getSessionId } from "../utils/session.js";
 import "./Order.css";
 
 function Order() {
   // --- Cart state ---
   const [cart, setCart] = useState([]);
   const nextId = useRef(1);
+  const sessionId = useRef(getSessionId()); // Persistent session ID
 
   // --- Drawer visibility ---
   const [drawerOpen, setDrawerOpen] = useState(false);
+
+  // --- Menu data from API ---
+  const [signatureBowls, setSignatureBowls] = useState([]);
+  const [signaturePitas, setSignaturePitas] = useState([]);
+  const [customBowlOptions, setCustomBowlOptions] = useState(null);
+  const [customPitaOptions, setCustomPitaOptions] = useState(null);
+  const [drinks, setDrinks] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   // --- Form refs ---
   const sigBowlRef = useRef(null);
@@ -16,6 +27,71 @@ function Order() {
   const sigPitaRef = useRef(null);
   const customPitaRef = useRef(null);
   const drinksRef = useRef(null);
+
+  // --- Load cart from database on mount ---
+  useEffect(() => {
+    const loadCart = async () => {
+      try {
+        const savedCart = await cartAPI.get(sessionId.current);
+        if (savedCart.items && savedCart.items.length > 0) {
+          setCart(savedCart.items);
+          // Update nextId to avoid conflicts
+          const maxId = Math.max(...savedCart.items.map(item => item.id), 0);
+          nextId.current = maxId + 1;
+        }
+      } catch (error) {
+        console.error('Failed to load cart:', error);
+        // Continue with empty cart if load fails
+      }
+    };
+    
+    loadCart();
+  }, []);
+
+  // --- Fetch menu items from API ---
+  useEffect(() => {
+    const fetchMenu = async () => {
+      try {
+        const [bowls, pitas, customBowl, customPita, drinkItems] = await Promise.all([
+          menuAPI.getByCategory('signature-bowl'),
+          menuAPI.getByCategory('signature-pita'),
+          menuAPI.getByCategory('custom-bowl'),
+          menuAPI.getByCategory('custom-pita'),
+          menuAPI.getByCategory('drink'),
+        ]);
+        
+        setSignatureBowls(bowls);
+        setSignaturePitas(pitas);
+        setCustomBowlOptions(customBowl[0]); // Get first (only) custom bowl template
+        setCustomPitaOptions(customPita[0]); // Get first (only) custom pita template
+        setDrinks(drinkItems);
+        setLoading(false);
+      } catch (error) {
+        console.error('Failed to load menu:', error);
+        alert('Failed to load menu items. Make sure the backend server is running.');
+        setLoading(false);
+      }
+    };
+    
+    fetchMenu();
+  }, []);
+
+  // --- Save cart to database whenever it changes ---
+  useEffect(() => {
+    const saveCart = async () => {
+      try {
+        await cartAPI.save(sessionId.current, cart);
+      } catch (error) {
+        console.error('Failed to save cart:', error);
+        // Don't show alert to avoid disrupting user experience
+      }
+    };
+    
+    // Only save if cart has been loaded (avoid saving empty cart on mount)
+    if (cart.length > 0 || nextId.current > 1) {
+      saveCart();
+    }
+  }, [cart]);
 
   // --- hide global body border while mounted (your original behavior) ---
   useEffect(() => {
@@ -131,6 +207,44 @@ function Order() {
 
   // --- Clear cart helper (optional) ---
   const clearCart = () => setCart([]);
+
+  // --- Submit order to MongoDB ---
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  
+  const submitOrder = async () => {
+    if (cart.length === 0) {
+      alert('Your cart is empty! Add items before submitting your order.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const orderData = {
+        items: cart,
+        totalItems: cart.length,
+        // Optional: add customer info here
+        // customerName: 'John Doe',
+        // customerEmail: 'john@example.com',
+        // customerPhone: '555-1234',
+      };
+
+      console.log('Submitting order:', orderData);
+      console.log('Cart items:', JSON.stringify(cart, null, 2));
+
+      const result = await ordersAPI.create(orderData);
+      alert(`Order submitted successfully! Order ID: ${result.order._id}`);
+      
+      // Clear cart after successful submission (both state and database)
+      await cartAPI.clear(sessionId.current);
+      clearCart();
+      setDrawerOpen(false);
+    } catch (error) {
+      console.error('Order submission error:', error);
+      alert(`Failed to submit order: ${error.message}\n\nMake sure the backend server is running (npm run dev in the server folder)`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   // --- UI components for cart items with editing ---
   function CartItem({ entry }) {
@@ -406,481 +520,340 @@ function Order() {
             ))}
           </div>
 
-          <div style={{ marginTop: 16 }}>
-            <button type="button" id="close-cart" onClick={() => setDrawerOpen(false)}>
-              Close
+          <div style={{ marginTop: 16, display: 'flex', gap: 8, flexDirection: 'column' }}>
+            <button 
+              type="button" 
+              onClick={submitOrder}
+              disabled={isSubmitting || cart.length === 0}
+              style={{
+                padding: '12px 24px',
+                backgroundColor: cart.length === 0 ? '#ccc' : '#28a745',
+                color: 'white',
+                border: 'none',
+                borderRadius: 4,
+                fontSize: '16px',
+                fontWeight: 'bold',
+                cursor: cart.length === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {isSubmitting ? 'Submitting...' : `Submit Order (${cart.length} items)`}
             </button>
-            <button type="button" id="clear-cart" onClick={clearCart} style={{ marginLeft: 285 }}>
-              Clear
-            </button>
+            
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" id="close-cart" onClick={() => setDrawerOpen(false)} style={{ flex: 1 }}>
+                Close
+              </button>
+              <button type="button" id="clear-cart" onClick={clearCart} style={{ flex: 1 }}>
+                Clear Cart
+              </button>
+            </div>
           </div>
         </div>
 
         <h1 className="option-heading">Bowls & Pitas Menu</h1>
 
-        {/* SIGNATURE BOWLS */}
-        <form className="oform" id="sigBowlForm" ref={sigBowlRef}>
-          <h2>Signature Bowls</h2>
+        {/* SIGNATURE BOWLS - Dynamic from API */}
+        {loading ? (
+          <div>Loading menu...</div>
+        ) : (
+          <form className="oform" id="sigBowlForm" ref={sigBowlRef}>
+            <h2>Signature Bowls</h2>
 
-          <fieldset>
-            <legend>Greek Chicken Bowl</legend>
-            <label>
-              <input type="checkbox" name="sig-greek-chicken-topping" value="Tomato + Onion" defaultChecked />
-              Tomato + Onion
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-greek-chicken-topping" value="Pickled Onions" defaultChecked />
-              Pickled Onions
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-greek-chicken-topping" value="Avocado" defaultChecked />
-              Avocado
-            </label>
-            <br />
-          </fieldset>
+            {signatureBowls.map((bowl) => (
+              <fieldset key={bowl._id}>
+                <legend>{bowl.name}</legend>
+                {bowl.description && <p style={{ fontSize: '0.9em', color: '#666' }}>{bowl.description}</p>}
+                {bowl.defaultToppings && bowl.defaultToppings.map((topping) => (
+                  <React.Fragment key={topping}>
+                    <label>
+                      <input 
+                        type="checkbox" 
+                        name={`sig-${bowl._id}-topping`}
+                        value={topping} 
+                        defaultChecked 
+                      />
+                      {topping}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            ))}
 
-          <fieldset>
-            <legend>Harissa Avocado Bowl</legend>
-            <label>
-              <input type="checkbox" name="sig-harissa-topping" value="Greens" defaultChecked />
-              Greens
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-harissa-topping" value="Feta" defaultChecked />
-              Feta
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-harissa-topping" value="Pickled Onions" defaultChecked />
-              Pickled Onions
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Spicy Lamb + Avocado Bowl</legend>
-            <label>
-              <input type="checkbox" name="sig-spicy-lamb-topping" value="Tomato + Onion" defaultChecked />
-              Tomato + Onion
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-spicy-lamb-topping" value="Pickled Onions" defaultChecked />
-              Pickled Onions
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-spicy-lamb-topping" value="Avocado" defaultChecked />
-              Avocado
-            </label>
-            <br />
-          </fieldset>
-
-          <button
-            type="button"
-            className="add-to-cart"
-            onClick={() => {
-              addSignatureItem(sigBowlRef.current);
-            }}
-          >
-            Add Signature Bowl(s) to Cart
-          </button>
-        </form>
+            <button
+              type="button"
+              className="add-to-cart"
+              onClick={() => {
+                addSignatureItem(sigBowlRef.current);
+              }}
+            >
+              Add Signature Bowl(s) to Cart
+            </button>
+          </form>
+        )}
 
         <hr className="ohr" />
 
-        {/* CUSTOM BOWLS */}
-        <form className="oform" id="customBowlForm" data-custom="true" ref={customBowlRef}>
-          <h2>Customize Your Own Bowl</h2>
+        {/* CUSTOM BOWLS - Dynamic from API */}
+        {loading || !customBowlOptions ? (
+          <div>Loading menu...</div>
+        ) : (
+          <form className="oform" id="customBowlForm" data-custom="true" ref={customBowlRef}>
+            <h2>Customize Your Own Bowl</h2>
 
-          <fieldset>
-            <legend>Bases (required)</legend>
-            <label>
-              <input type="checkbox" name="base" value="SuperGreens" />
-              SuperGreens
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="base" value="Romaine" />
-              Romaine
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="base" value="Basmati Rice" />
-              Basmati Rice
-            </label>
-            <br />
-          </fieldset>
+            {customBowlOptions.availableOptions?.bases && (
+              <fieldset>
+                <legend>Bases (required)</legend>
+                {customBowlOptions.availableOptions.bases.map((base) => (
+                  <React.Fragment key={base}>
+                    <label>
+                      <input type="checkbox" name="base" value={base} />
+                      {base}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Proteins (required)</legend>
-            <label>
-              <input type="checkbox" name="protein" value="Grilled Chicken" />
-              Grilled Chicken
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="protein" value="Falafel" />
-              Falafel
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="protein" value="Braised Lamb" />
-              Braised Lamb
-            </label>
-            <br />
-          </fieldset>
+            {customBowlOptions.availableOptions?.proteins && (
+              <fieldset>
+                <legend>Proteins (required)</legend>
+                {customBowlOptions.availableOptions.proteins.map((protein) => (
+                  <React.Fragment key={protein}>
+                    <label>
+                      <input type="checkbox" name="protein" value={protein} />
+                      {protein}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Spreads & Dips</legend>
-            <label>
-              <input type="checkbox" name="spread" value="Hummus" />
-              Hummus
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Tzatziki" />
-              Tzatziki
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Red Pepper Hummus" />
-              Red Pepper Hummus
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Crazy Feta" />
-              Crazy Feta®
-            </label>
-            <br />
-          </fieldset>
+            {customBowlOptions.availableOptions?.spreads && (
+              <fieldset>
+                <legend>Spreads & Dips</legend>
+                {customBowlOptions.availableOptions.spreads.map((spread) => (
+                  <React.Fragment key={spread}>
+                    <label>
+                      <input type="checkbox" name="spread" value={spread} />
+                      {spread}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Toppings</legend>
-            <label>
-              <input type="checkbox" name="topping" value="Tomato + Onion Salad" />
-              Tomato + Onion Salad
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Pickled Onions" />
-              Pickled Onions
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Avocado" />
-              Avocado
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Kalamata Olives" />
-              Kalamata Olives
-            </label>
-            <br />
-          </fieldset>
+            {customBowlOptions.availableOptions?.toppings && (
+              <fieldset>
+                <legend>Toppings</legend>
+                {customBowlOptions.availableOptions.toppings.map((topping) => (
+                  <React.Fragment key={topping}>
+                    <label>
+                      <input type="checkbox" name="topping" value={topping} />
+                      {topping}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Dressings (required)</legend>
-            <label>
-              <input type="checkbox" name="dressing" value="Greek Vinaigrette" />
-              Greek Vinaigrette
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="dressing" value="Lemon Herb Tahini" />
-              Lemon Herb Tahini
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="dressing" value="Hot Harissa Vinaigrette" />
-              Hot Harissa Vinaigrette
-            </label>
-            <br />
-          </fieldset>
+            {customBowlOptions.availableOptions?.dressings && (
+              <fieldset>
+                <legend>Dressings (required)</legend>
+                {customBowlOptions.availableOptions.dressings.map((dressing) => (
+                  <React.Fragment key={dressing}>
+                    <label>
+                      <input type="checkbox" name="dressing" value={dressing} />
+                      {dressing}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <button
-            type="button"
-            className="add-to-cart"
-            onClick={() => {
-              addCustomItem(customBowlRef.current, "Custom Bowl");
-            }}
-          >
-            Add Custom Bowl to Cart
-          </button>
-        </form>
+            <button
+              type="button"
+              className="add-to-cart"
+              onClick={() => {
+                addCustomItem(customBowlRef.current, "Custom Bowl");
+              }}
+            >
+              Add Custom Bowl to Cart
+            </button>
+          </form>
+        )}
 
         <hr className="ohr" />
 
-        {/* SIGNATURE PITAS */}
-        <form className="oform" id="sigPitaForm" ref={sigPitaRef}>
-          <h2>Signature Pitas</h2>
+        {/* SIGNATURE PITAS - Dynamic from API */}
+        {loading ? (
+          <div>Loading menu...</div>
+        ) : (
+          <form className="oform" id="sigPitaForm" ref={sigPitaRef}>
+            <h2>Signature Pitas</h2>
 
-          <fieldset>
-            <legend>Greek Chicken Pita</legend>
-            <label>
-              <input type="checkbox" name="sig-greek-pita-topping" value="Tomato + Onion" defaultChecked />
-              Tomato + Onion
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-greek-pita-topping" value="Pickled Onions" defaultChecked />
-              Pickled Onions
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-greek-pita-topping" value="Avocado" defaultChecked />
-              Avocado
-            </label>
-            <br />
-          </fieldset>
+            {signaturePitas.map((pita) => (
+              <fieldset key={pita._id}>
+                <legend>{pita.name}</legend>
+                {pita.description && <p style={{ fontSize: '0.9em', color: '#666' }}>{pita.description}</p>}
+                {pita.defaultToppings && pita.defaultToppings.map((topping) => (
+                  <React.Fragment key={topping}>
+                    <label>
+                      <input 
+                        type="checkbox" 
+                        name={`sig-${pita._id}-topping`}
+                        value={topping} 
+                        defaultChecked 
+                      />
+                      {topping}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            ))}
 
-          <fieldset>
-            <legend>Steak & Feta Pita</legend>
-            <label>
-              <input type="checkbox" name="sig-steak-feta-pita-topping" value="Briny Pickles" defaultChecked />
-              Briny Pickles
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="sig-steak-feta-pita-topping" value="Pickled Onions" defaultChecked />
-              Pickled Onions
-            </label>
-            <br />
-          </fieldset>
-
-          <button
-            type="button"
-            className="add-to-cart"
-            onClick={() => {
-              addSignatureItem(sigPitaRef.current);
-            }}
-          >
-            Add Signature Pita(s) to Cart
-          </button>
-        </form>
+            <button
+              type="button"
+              className="add-to-cart"
+              onClick={() => {
+                addSignatureItem(sigPitaRef.current);
+              }}
+            >
+              Add Signature Pita(s) to Cart
+            </button>
+          </form>
+        )}
 
         <hr className="ohr" />
 
-        {/* CUSTOM PITAS */}
-        <form className="oform" id="customPitaForm" data-custom="true" ref={customPitaRef}>
-          <h2>Customize Your Own Pita</h2>
+        {/* CUSTOM PITAS - Dynamic from API */}
+        {loading || !customPitaOptions ? (
+          <div>Loading menu...</div>
+        ) : (
+          <form className="oform" id="customPitaForm" data-custom="true" ref={customPitaRef}>
+            <h2>Customize Your Own Pita</h2>
 
-          <fieldset>
-            <legend>Proteins (required)</legend>
-            <label>
-              <input type="checkbox" name="protein" value="Grilled Chicken" />
-              Grilled Chicken
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="protein" value="Falafel" />
-              Falafel
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="protein" value="Braised Lamb" />
-              Braised Lamb
-            </label>
-            <br />
-          </fieldset>
+            {customPitaOptions.availableOptions?.proteins && (
+              <fieldset>
+                <legend>Proteins (required)</legend>
+                {customPitaOptions.availableOptions.proteins.map((protein) => (
+                  <React.Fragment key={protein}>
+                    <label>
+                      <input type="checkbox" name="protein" value={protein} />
+                      {protein}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Spreads & Dips</legend>
-            <label>
-              <input type="checkbox" name="spread" value="Hummus" />
-              Hummus
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Tzatziki" />
-              Tzatziki
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Red Pepper Hummus" />
-              Red Pepper Hummus
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="spread" value="Crazy Feta" />
-              Crazy Feta®
-            </label>
-            <br />
-          </fieldset>
+            {customPitaOptions.availableOptions?.spreads && (
+              <fieldset>
+                <legend>Spreads & Dips</legend>
+                {customPitaOptions.availableOptions.spreads.map((spread) => (
+                  <React.Fragment key={spread}>
+                    <label>
+                      <input type="checkbox" name="spread" value={spread} />
+                      {spread}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Toppings</legend>
-            <label>
-              <input type="checkbox" name="topping" value="Tomato + Onion Salad" />
-              Tomato + Onion Salad
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Pickled Onions" />
-              Pickled Onions
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Avocado" />
-              Avocado
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="topping" value="Kalamata Olives" />
-              Kalamata Olives
-            </label>
-            <br />
-          </fieldset>
+            {customPitaOptions.availableOptions?.toppings && (
+              <fieldset>
+                <legend>Toppings</legend>
+                {customPitaOptions.availableOptions.toppings.map((topping) => (
+                  <React.Fragment key={topping}>
+                    <label>
+                      <input type="checkbox" name="topping" value={topping} />
+                      {topping}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <fieldset>
-            <legend>Dressings (required)</legend>
-            <label>
-              <input type="checkbox" name="dressing" value="Greek Vinaigrette" />
-              Greek Vinaigrette
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="dressing" value="Lemon Herb Tahini" />
-              Lemon Herb Tahini
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="dressing" value="Hot Harissa Vinaigrette" />
-              Hot Harissa Vinaigrette
-            </label>
-            <br />
-          </fieldset>
+            {customPitaOptions.availableOptions?.dressings && (
+              <fieldset>
+                <legend>Dressings (required)</legend>
+                {customPitaOptions.availableOptions.dressings.map((dressing) => (
+                  <React.Fragment key={dressing}>
+                    <label>
+                      <input type="checkbox" name="dressing" value={dressing} />
+                      {dressing}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            )}
 
-          <button
-            type="button"
-            className="add-to-cart"
-            onClick={() => {
-              addCustomItem(customPitaRef.current, "Custom Pita");
-            }}
-          >
-            Add Custom Pita to Cart
-          </button>
-        </form>
+            <button
+              type="button"
+              className="add-to-cart"
+              onClick={() => {
+                addCustomItem(customPitaRef.current, "Custom Pita");
+              }}
+            >
+              Add Custom Pita to Cart
+            </button>
+          </form>
+        )}
 
         <hr className="ohr" />
 
         <h1 className="option-heading">Drinks Menu</h1>
 
-        {/* DRINKS FORM */}
-        <form className="oform" id="drinksForm" ref={drinksRef}>
-          <h2>Drinks</h2>
+        {/* DRINKS FORM - Dynamic from API */}
+        {loading ? (
+          <div>Loading menu...</div>
+        ) : (
+          <form className="oform" id="drinksForm" ref={drinksRef}>
+            <h2>Drinks</h2>
 
-          <fieldset>
-            <legend>Pineapple Apple Mint</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
+            {drinks.map((drink) => (
+              <fieldset key={drink._id}>
+                <legend>{drink.name}</legend>
+                {drink.description && <p style={{ fontSize: '0.9em', color: '#666' }}>{drink.description}</p>}
+                {drink.sizes && drink.sizes.map((size) => (
+                  <React.Fragment key={size.name}>
+                    <label>
+                      <input 
+                        type="checkbox" 
+                        name={size.name.toLowerCase()} 
+                        value={size.name.toLowerCase()} 
+                        defaultChecked={false} 
+                      />
+                      {size.name}
+                    </label>
+                    <br />
+                  </React.Fragment>
+                ))}
+              </fieldset>
+            ))}
 
-          <fieldset>
-            <legend>Blueberry Lavender</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Cucumber Mint Lime</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Classic Lemonade</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Jasmine Green Tea</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Unsweet Tea</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <fieldset>
-            <legend>Fountain Soda</legend>
-            <label>
-              <input type="checkbox" name="small" value="small" defaultChecked={false} />
-              Small
-            </label>
-            <br />
-            <label>
-              <input type="checkbox" name="large" value="large" defaultChecked={false} />
-              Large
-            </label>
-            <br />
-          </fieldset>
-
-          <button
-            type="button"
-            className="add-to-cart"
-            onClick={() => {
-              addDrinks(drinksRef.current);
-            }}
-          >
-            Add Drink(s) to Cart
-          </button>
-        </form>
+            <button
+              type="button"
+              className="add-to-cart"
+              onClick={() => {
+                addDrinks(drinksRef.current);
+              }}
+            >
+              Add Drink(s) to Cart
+            </button>
+          </form>
+        )}
       </div>
     </>
   );
